@@ -4,12 +4,12 @@
 # https://twiki.cern.ch/twiki/bin/viewauth/CMS/PdmV2018Analysis
 # https://twiki.cern.ch/twiki/bin/view/CMS/TWikiLUM#PileupInformation
 
-import os, sys, shutil
+import os, sys, re, shutil, json
 from argparse import ArgumentParser
 from corrections import ensureTFileAndTH1
 from tools import CMS_style
 import ROOT; ROOT.PyConfig.IgnoreCommandLineOptions = True
-from ROOT import gROOT, gDirectory, gStyle, gPad, TFile, TTree, TCanvas, TH1, TLine, TLegend,\
+from ROOT import gROOT, gDirectory, gStyle, gPad, TFile, TTree, TCanvas, TH1, TH1F, TLine, TLegend,\
                  kBlack, kRed, kAzure, kGreen, kOrange, kMagenta, kYellow
 gROOT.SetBatch(True)
 gStyle.SetOptStat(False)
@@ -24,8 +24,10 @@ parser.add_argument('-y', '--year',    dest='years', choices=[2016,2017,2018], t
                                        help="select year" )
 parser.add_argument('-c', '--channel', dest='channel', choices=['mutau','etau'], type=str, default='mutau', action='store',
                                        help="select channel" )
-parser.add_argument('-t', '--type',    dest='types', choices=['data','mc'], type=str, nargs='+', default=['data','mc'], action='store',
+parser.add_argument('-t', '--type',    dest='types', choices=['data','mc','flat'], type=str, nargs='+', default=['data','mc'], action='store',
                                        help="make profile for data and/or MC" )
+parser.add_argument('-e', '--era',     dest='eras', type=str, nargs='+', default=[ ], action='store',
+                                       help="make data profiles for given era (e.g. B, BCD, GH, ...)" )
 parser.add_argument('-p', '--plot',    dest='plot', default=False, action='store_true', 
                                        help="plot profiles" )
 parser.add_argument('-v', '--verbose', dest='verbose', default=False, action='store_true', 
@@ -90,8 +92,12 @@ def getDataProfile(outfilename,JSON,pileup,bins,year,minbias,local=False):
     hist.SetName("%s_%s"%(histname,str(minbias).replace('.','p')))
     hist.SetTitle("Data %s, %.1f pb"%(year,minbias))
     hist.SetDirectory(0)
-    hist.SetBinContent(0,0.0)
-    hist.SetBinContent(1,0.0)
+    bin0 = 100.0*hist.GetBinContent(0)/hist.Integral()
+    bin1 = 100.0*hist.GetBinContent(1)/hist.Integral()
+    if bin0>0.01 or bin1>0.01:
+      print ">>>   Warning! First to bins have %.2f%% (0) and %.2f%% (1)"%(bin0,bin1)
+      hist.SetBinContent(0,0.0)
+      hist.SetBinContent(1,0.0)
     print ">>>   pileup profile in data with min. bias %s mb has a mean of %.1f"%(minbias,hist.GetMean())
     file.Close()
     
@@ -100,6 +106,7 @@ def getDataProfile(outfilename,JSON,pileup,bins,year,minbias,local=False):
 
 
 def getGenProfile(outfilename,year):
+    """Create generator pileup profile."""
     print ">>> getGenProfile(%s):"%(year)
     if year==2016:
       bins = [
@@ -181,19 +188,42 @@ def getGenProfile(outfilename,year):
     
     file = TFile(outfilename,'RECREATE')
     hist.Write('pileup')
+    hist.SetDirectory(0)
     file.Close()
+    return hist
     
 
 
-def compareMCProfiles(indir,samples,channel,year,tag=""):
+def getFlatProfile(outfilename,max=75,nbins=100,xmin=0,xmax=100):
+    """Create flat profile."""
+    print ">>> getFlatProfile()"
+    hist = TH1F('pileup','pileup',nbins,xmin,xmax)
+    hist.Sumw2()
+    binc = 1./max
+    for i in xrange(1,max+1):
+      hist.SetBinContent(i,binc)
+    hist.Scale(1./hist.Integral())
+    file = TFile(outfilename,'RECREATE')
+    hist.Write('pileup')
+    hist.SetDirectory(0)
+    file.Close()
+    return hist
+    
+
+
+def compareMCProfiles(indir,samples,channel,era,tag=""):
     """Compare MC profiles."""
     print ">>> compareMCProfiles()"
     
-    histname = 'pileup'
-    outdir   = ensureDirectory("plots")
-    avehist  = None
-    hists    = [ ]
-    if tag and tag[0]!='_': tag = '_'+tag
+    histname  = 'pileup'
+    histtitle = 'MC average'
+    outdir    = ensureDirectory("plots")
+    avehist   = None
+    hists     = [ ]
+    if tag and tag[0]!='_':
+      tag = '_'+tag
+    if 'pmx' in tag:
+      histtitle += " %s pre-mixing"%("old" if "old" in tag else "new")
     
     # GET histograms
     for subdir, samplename in samples:
@@ -212,7 +242,7 @@ def compareMCProfiles(indir,samples,channel,year,tag=""):
         continue
       if avehist==None:
         avehist = hist.Clone('average%s'%tag)
-        avehist.SetTitle('MC average')
+        avehist.SetTitle(histtitle)
         avehist.SetDirectory(0)
       avehist.Add(hist)
       hist.Scale(1./hist.Integral())
@@ -223,7 +253,7 @@ def compareMCProfiles(indir,samples,channel,year,tag=""):
     hists  = [avehist]+hists
     colors = [kBlack]+linecolors
     avehist.Scale(1./avehist.Integral())
-    plotname = "%s/pileup_MC_%s%s"%(outdir,year,tag)
+    plotname = "%s/pileup_MC_%s%s"%(outdir,era,tag)
     drawHistsWithRatio(hists,plotname,xtitle="Number of true interactions",ytitle="A.U.",
                        textsize=0.032,rmin=0.45,rmax=1.55,colors=colors)
     for hist in hists:
@@ -237,22 +267,29 @@ def compareMCProfiles(indir,samples,channel,year,tag=""):
     
 
 
-def compareDataMCProfiles(datahist,mchist,year,minbias,tag=""):
+def compareDataMCProfiles(datahist,mchist,era,minbias,tag="",rmin=0.75,rmax=1.25):
     """Compare data/MC profiles."""
     print ">>> compareDataMCProfiles()"
-    if tag and tag[0]!='_': tag = '_'+tag    
-    outdir = ensureDirectory("plots")
-    hists  = [datahist,mchist]
-    colors = [kBlack]+linecolors
+    mctitle = "MC average"
+    outdir  = ensureDirectory("plots")
+    hists   = [datahist,mchist]
+    colors  = [kBlack]+linecolors
+    width   = 0.36 if 'pmx' in tag else 0.26
+    if isinstance(era,str) and "Run" in era:
+      width =  max(width,0.26+(len(era)-5)*0.02)
+    if tag and tag[0]!='_':
+      tag = '_'+tag
+    if 'pmx' in tag:
+      mctitle += " (%s pre-mixing)"%("old" if "old" in tag else "new")
     
-    datahist.SetTitle("Data %s, %.1f pb"%(year,minbias))
-    mchist.SetTitle("MC average")
+    datahist.SetTitle("Data %s, %.1f pb"%(era,minbias))
+    mchist.SetTitle(mctitle)
     datahist.Scale(1./datahist.Integral())
     mchist.Scale(1./mchist.Integral())
     
-    plotname = "%s/pileup_Data-MC_%s_%s%s"%(outdir,year,str(minbias).replace('.','p'),tag)
+    plotname = "%s/pileup_Data-MC_%s_%s%s"%(outdir,era,str(minbias).replace('.','p'),tag)
     drawHistsWithRatio(hists,plotname,xtitle="Number of interactions",ytitle="A.U.",rtitle="Data / MC",
-                       textsize=0.045,rmin=0.75,rmax=1.25,colors=colors)
+                       textsize=0.045,rmin=rmin,rmax=rmax,denom=2,colors=colors,width=width)
     
 
 
@@ -274,6 +311,7 @@ def drawHistsWithRatio(hists,name,**kwargs):
     denom      = kwargs.get('denom',        1                    )-1 # denominator for ratio
     textsize   = kwargs.get('textsize',     0.045                )
     texts      = kwargs.get('text',         [ ]                  )
+    width      = kwargs.get('width',        0.26                 )
     #textheight = kwargs.get('textheight',   1.09                 )
     #ctext      = kwargs.get('ctext',        [ ]                  ) # corner text
     #cposition  = kwargs.get('cposition',    'topleft'            ).lower() # cornertext
@@ -331,10 +369,9 @@ def drawHistsWithRatio(hists,name,**kwargs):
     if ymin: frame.SetMinimum(ymin)
     if ymax: frame.SetMaximum(ymax)
     
-    width    = 0.25
     height   = 1.1*textsize*len([l for l in texts+hists if l])
-    x1, y1   = 0.65, 0.88
-    x2, y2   = x1+width, y1-height
+    x1, y1   = 0.90, 0.88
+    x2, y2   = x1-width, y1-height
     legend = TLegend(x1,y1,x2,y2)
     legend.SetTextSize(textsize)
     legend.SetBorderSize(0)
@@ -363,6 +400,12 @@ def drawHistsWithRatio(hists,name,**kwargs):
       if i==denom: continue
       ratio = hist.Clone(hist.GetName()+"_ratio")
       ratio.Divide(hists[denom])
+      for ibin in xrange(1,hist.GetXaxis().GetNbins()+1):
+        if hists[denom].GetBinContent(ibin)==0:
+          if hist.GetBinContent(ibin)==0:
+            ratio.SetBinContent(ibin,1)
+          else:
+            ratio.SetBinContent(ibin,rmax+1e5)
       ratio.Draw('HIST SAME')
       ratios.append(ratio)
     frame_ratio = ratios[0]
@@ -395,16 +438,80 @@ def drawHistsWithRatio(hists,name,**kwargs):
     canvas.SaveAs(name+".png")
     canvas.SaveAs(name+".pdf")
     canvas.Close()
+    
 
+
+def filterJSONByRunNumberRange(jsoninname,jsonoutname,start,end,verbose=False):
+    """Split a given JSON file by start and end run number."""
+    print ">>> filterJSONByRunNumberRange: %s %s - %s"%(jsonoutname,start,end)
+    
+    # READ JSON IN
+    with open(jsoninname,'r') as jsonin:
+      data = json.load(jsonin)
+    
+    # FILTER run number range
+    nkeep = 0
+    ndrop = 0
+    for element in sorted(data.keys()):
+      if element.isdigit():
+        runnumber = int(element)
+        if runnumber<start or runnumber>end:
+          ndrop += 1
+          if verbose: print "  dropping %s"%runnumber
+          del data[element]
+        else:
+          nkeep += 1
+          if verbose: print "  keeping %s"%runnumber
+      else:
+        print "Warning! filterJSONByRunNumberRange: element is not an integer (run number): '%s'"%element
+    
+    # WRITE JSON OUT
+    with open(jsonoutname,'w') as jsonout:
+      data = json.dump(data,jsonout,sort_keys=True)
+    
+    # SUMMARY
+    print ">>>   saved %s / %s run numbers"%(nkeep,nkeep+ndrop)
+    
+    return jsonoutname
+    
+
+def cleanEras(eras):
+  """Clean up eras."""
+  if not eras: return eras
+  for i, era in enumerate(eras):
+    era = era.upper()
+    assert all(s in 'ABCDEFGH' for s in era), "Did not recognize era '%s'!"%era
+    eras[i] = ''.join(sorted(era))
+  return eras
+  
+
+def getEraRunNumbers(era,datasets):
+  """Get runnumbers for an era (e.g. 'B', 'BCD' or 'GH')."""
+  start  = -1
+  end    = -1
+  for set in era:
+    assert set in datasets, "Dataset '%s' not in list %s"%(set,datasets)
+    setstart, setend = datasets[set]
+    if start<0 or end<0:
+      start, end = setstart, setend
+      continue
+    if setstart<start:
+      start = setstart
+    if setend>end:
+      end = setend
+  assert start>0 and end>0, "Invalid runnumbers %s to %s"%(start,end)
+  return start, end
 
 
 def copyToLocal(filename):
   """Copy file to current directory, and return new name."""
   fileold = filename
+  assert os.path.isfile(fileold), "Copy failed! Old file %s does not exist!"%(fileold)
   filenew = filename.split('/')[-1]
+  if filenew==re.sub(r"^\./","",fileold):
+    print ">>> Warning! copyToLocal: No sense in copying %s to %s"%(fileold,filenew)
   shutil.copyfile(fileold,filenew)
-  if not os.path.isfile(filenew):
-    print ">>> ERROR! Copy %s failed!"%(filenew)
+  assert os.path.isfile(filenew), "Copy failed! New file %s does not exist!"%(filenew)
   return filenew
   
 
@@ -423,18 +530,30 @@ def ensureDirectory(dirname):
 def main():
     
     years     = args.years
+    eras      = cleanEras(args.eras)
     channel   = args.channel
     types     = args.types
-    minbiases = [ 69.2, 80.0, 69.2*1.046, 69.2*0.954 ]
+    minbiases = [ 69.2 ] if eras else [ 69.2, 80.0, 69.2*1.046, 69.2*0.954 ]
     
     for year in args.years:
-      filename  = "MC_PileUp_%d.root"%(year)
-      indir     = "/scratch/ineuteli/analysis/LQ_%d"%(year)
+      mcfilename = "MC_PileUp_%d.root"%(year)
+      indir      = "/scratch/ineuteli/analysis/LQ_%d"%(year)
       if year==2016:
-        #JSON    = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions16/13TeV/ReReco/Final/Cert_271036-284044_13TeV_23Sep2016ReReco_Collisions16_JSON.txt"
-        JSON    = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions16/13TeV/ReReco/Final/Cert_271036-284044_13TeV_ReReco_07Aug2017_Collisions16_JSON.txt"
-        pileup  = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions16/13TeV/PileUp/pileup_latest.txt"
-        samples = [
+        # https://twiki.cern.ch/twiki/bin/viewauth/CMS/PdmV2017Analysis
+        #JSON     = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions16/13TeV/ReReco/Final/Cert_271036-284044_13TeV_23Sep2016ReReco_Collisions16_JSON.txt"
+        JSON     = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions16/13TeV/ReReco/Final/Cert_271036-284044_13TeV_ReReco_07Aug2017_Collisions16_JSON.txt"
+        pileup   = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions16/13TeV/PileUp/pileup_latest.txt"
+        datasets = {
+          'B': (272007,275376),
+          'C': (275657,276283),
+          'D': (276315,276811),
+          'E': (276831,277420),
+          'F': (277772,278808),
+          'G': (278820,280385),
+          'H': (280919,284044),
+        }
+        campaign = "Moriond17"
+        samples  = [
           ( 'TT', "TT",                   ),
           ( 'DY', "DYJetsToLL_M-10to50",  ),
           ( 'DY', "DYJetsToLL_M-50_reg",  ),
@@ -456,10 +575,17 @@ def main():
           ( 'VV', "ZZ",                   ),
         ]
       elif year==2017:
-        filename_bug = filename.replace(".root","_old_pmx.root")
-        filename_fix = filename.replace(".root","_new_pmx.root")
-        JSON         = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions17/13TeV/Final/Cert_294927-306462_13TeV_PromptReco_Collisions17_JSON.txt"
-        pileup       = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions17/13TeV/PileUp/pileup_latest.txt"    
+        # https://twiki.cern.ch/twiki/bin/viewauth/CMS/PdmV2017Analysis
+        JSON     = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions17/13TeV/Final/Cert_294927-306462_13TeV_PromptReco_Collisions17_JSON.txt"
+        pileup   = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions17/13TeV/PileUp/pileup_latest.txt"   
+        datasets = {
+          'B': (297020,299329),
+          'C': (299337,302029),
+          'D': (302030,303434),
+          'E': (303435,304826),
+          'F': (304911,306462),
+        }
+        campaign = "Winter17_V2"
         samples_bug  = [
           #( 'DY', "DYJetsToLL_M-50",      ),
           ( 'DY', "DYJetsToLL_M-50_reg",  ),
@@ -498,8 +624,16 @@ def main():
         ]
         samples = samples_bug + samples_fix
       else:
-        JSON    = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions18/13TeV/PromptReco/Cert_314472-325175_13TeV_PromptReco_Collisions18_JSON.txt"
-        pileup  = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions18/13TeV/PileUp/pileup_latest.txt"
+        # https://twiki.cern.ch/twiki/bin/viewauth/CMS/PdmV2018Analysis
+        JSON     = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions18/13TeV/PromptReco/Cert_314472-325175_13TeV_PromptReco_Collisions18_JSON.txt"
+        pileup   = "/afs/cern.ch/cms/CAF/CMSCOMM/COMM_DQM/certification/Collisions18/13TeV/PileUp/pileup_latest.txt"
+        datasets = {
+          'A': (315252,316995),
+          'B': (317080,319310),
+          'C': (319337,320065),
+          'D': (320673,325175),
+        }
+        campaign = "Autumn18"
         samples = [
           ( 'TT', "TTTo2L2Nu",            ),
           ( 'TT', "TTToHadronic",         ),
@@ -525,41 +659,69 @@ def main():
           ( 'VV', "ZZ",                   ),
         ]
       
+      # JSON
+      jsons = { }
+      if eras:
+        outdir = ensureDirectory("json")
+        for era in eras:
+          start, end = getEraRunNumbers(era,datasets)
+          erarun     = "Run%d%s"%(year,era)
+          jsonout    = "json/"+re.sub(r"\d{6}-\d{6}",erarun,JSON.split('/')[-1])
+          filterJSONByRunNumberRange(JSON,jsonout,start,end,verbose=False)
+          jsons[erarun] = jsonout
+      else:
+        jsons[year] = JSON
+      
       # DATA
-      datafiles = [ ]
-      datahists = [ ]
-      if 'data' in args.types:
-        for minbias in minbiases:
-          filename = "Data_PileUp_%d_%s.root"%(year,str(minbias).replace('.','p'))
-          datahist = getDataProfile(filename,JSON,pileup,100,year,minbias)
-          datahists.append(datahist)
-          datafiles.append(filename)
+      datahists = { era: [ ] for era in jsons }
+      if 'data' in types:
+        for era, json in jsons.iteritems():
+          for minbias in minbiases:
+            filename = "Data_PileUp_%s_%s.root"%(era,str(minbias).replace('.','p'))
+            datahist = getDataProfile(filename,json,pileup,100,year,minbias)
+            datahists[era].append((minbias,datahist))
       elif args.plot:
-        for minbias in minbiases:
-          filename = "Data_PileUp_%d_%s.root"%(year,str(minbias).replace('.','p'))
-          file, hist = ensureTFileAndTH1(filename,'pileup')
-          if not file or not hist: continue
-          hist.SetDirectory(0)
-          file.Close()
-          datahists.append(hist)
+        for era in jsons:
+          for minbias in minbiases:
+            filename = "Data_PileUp_%s_%s.root"%(era,str(minbias).replace('.','p'))
+            file, hist = ensureTFileAndTH1(filename,'pileup')
+            if not file or not hist: continue
+            hist.SetDirectory(0)
+            file.Close()
+            datahists[era].append((minbias,hist))
       
       # MC
-      CMS_style.setYear(year)
-      if 'mc' in args.types:
-        getMCProfile(filename,indir,samples,channel,year)
+      if 'mc' in types:
+        mcfilename = "MC_PileUp_%d.root"%(year)
+        #mcfilename = "MC_PileUp_%d_%s.root"%(year,campaign)
+        CMS_style.setYear(year)
+        getMCProfile(mcfilename,indir,samples,channel,year)
         if args.plot:
           mchist = compareMCProfiles(indir,samples,channel,year)
-          for minbias, datahist in zip(minbiases,datahists):
-            compareDataMCProfiles(datahist,mchist,year,minbias)
-        if year==2017:
-          getMCProfile(filename_bug,indir,samples_bug,channel,year)
-          getMCProfile(filename_fix,indir,samples_fix,channel,year)
+          for era in jsons:
+            for minbias, datahist in datahists[era]:
+              compareDataMCProfiles(datahist,mchist,era,minbias)
+        if year==2017: # also check new/old pmx separately
+          mcfilename_bug = mcfilename.replace(".root","_old_pmx.root")
+          mcfilename_fix = mcfilename.replace(".root","_new_pmx.root")
+          getMCProfile(mcfilename_bug,indir,samples_bug,channel,year)
+          getMCProfile(mcfilename_fix,indir,samples_fix,channel,year)
           if args.plot:
             mchist_bug = compareMCProfiles(indir,samples_bug,channel,year,tag="old_pmx")
             mchist_fix = compareMCProfiles(indir,samples_fix,channel,year,tag="new_pmx")
-            for minbias, datahist in zip(minbiases,datahists):
-              compareDataMCProfiles(datahist,mchist_bug,year,minbias,tag="old_pmx")
-              compareDataMCProfiles(datahist,mchist_fix,year,minbias,tag="new_pmx")
+            for era in jsons:
+              for minbias, datahist in datahists[era]:
+                compareDataMCProfiles(datahist,mchist_bug,era,minbias,tag="old_pmx")
+                compareDataMCProfiles(datahist,mchist_fix,era,minbias,tag="new_pmx")
+      
+      # FLAT
+      if 'flat' in types:
+        CMS_style.setYear(year)
+        filename  = "MC_PileUp_%d_FlatPU0to75.root"%year
+        hist_flat = getFlatProfile(filename,75)
+        for era in jsons:
+          for minbias, datahist in datahists[era]:
+            compareDataMCProfiles(datahist,hist_flat,era,minbias,tag="FlatPU0to75",rmin=0.0,rmax=3.1)
       
 
 

@@ -21,7 +21,10 @@ The MC profile can be taken from the distribution of the `Pileup_nTrueInt` varia
 ```
 and then extracted with [`pileup/getPileupProfiles.py`](pileup/getPileupProfiles.py). Comparisons are shown [here for 2016](https://ineuteli.web.cern.ch/ineuteli/pileup/2016/), [here for 2017](https://ineuteli.web.cern.ch/ineuteli/pileup/2017/) and [here for 2018](https://ineuteli.web.cern.ch/ineuteli/pileup/2018/).
 
-Please note that some 2017 samples had a buggy pileup module, and need to be treated separately, see [this](https://hypernews.cern.ch/HyperNews/CMS/get/generators/4060.html?inline=-1) or [this HyperNews post](https://hypernews.cern.ch/HyperNews/CMS/get/physics-validation/3128.html). `PileupWeightTool.py` manually checks for some of these samples with the `hasBuggyPU` help function. Also, [`pileup/getPileupProfiles.py`](pileup/getPileupProfiles.py) splits the 2017 MC pileup profiles into those of the buggy (`old_pmx`) and fixed (`new_pmx`) samples. You can check your own favorite samples using `dasgoclient`:
+Please note that some 2017 samples had a buggy pileup module, and need to be treated separately, see [this](https://hypernews.cern.ch/HyperNews/CMS/get/generators/4060.html?inline=-1) or [this HyperNews post](https://hypernews.cern.ch/HyperNews/CMS/get/physics-validation/3128.html).
+`PileupWeightTool.py` manually checks for some of these samples with the `hasBuggyPU` help function.
+Also, [`pileup/getPileupProfiles.py`](pileup/getPileupProfiles.py) splits the 2017 MC pileup profiles into those of the buggy (`old_pmx`) and fixed (`new_pmx`) samples.
+You can find out if your favorite samples has a buggy pileup profile by passing its DAS path to [`pileup/checkBuggyPileup2017.sh`](pileup/checkBuggyPileup2017.sh), which makes use of `dasgoclient`:
 ```
 ./pileup/checkBuggyPileup2017.sh /DY*JetsToLL_M-50_TuneCP5*mad*/RunIIFall17*/NANOAOD*
 ```
